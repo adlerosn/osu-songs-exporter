@@ -1,0 +1,17 @@
+[package]
+name = "osu-songs-exporter"
+version = "0.1.0"
+authors = ["Adler Neves <adlerosn@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+argparse = "^0.2"
+derivative = "^2"
+derive-new = "^0.5"
+derive_more = "^0.99"
+rusqlite = { version = "^0.24", features = ["backup"] }
+audiotags = "^0.2" 
+image = "^0.23"
+threadpool = "^1"
