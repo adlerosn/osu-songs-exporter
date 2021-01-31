@@ -98,11 +98,24 @@ fn main() -> Result<(), String> {
     let thread_pool = threadpool::ThreadPool::new(16);
     for (destination_path, beatmap_info_holder) in beatmap_copies.iter() {
         if !destination_path.is_file() || cli_args.remove_missing_songs {
-            std::fs::write(
-                &destination_path,
-                &std::fs::read(&beatmap_info_holder.audio).unwrap(),
-            )
-            .unwrap();
+            subprocess::Exec::cmd("ffmpeg")
+                .arg("-y")
+                .arg("-i")
+                .arg(&beatmap_info_holder.audio.to_str().unwrap())
+                .arg("-map")
+                .arg("0:a")
+                .arg("-c:a")
+                .arg("copy")
+                .arg(&destination_path.to_str().unwrap())
+                .stdout(subprocess::Redirection::Pipe)
+                .stderr(subprocess::Redirection::Pipe)
+                .join()
+                .unwrap();
+            // std::fs::write(
+            //     &destination_path,
+            //     &std::fs::read(&beatmap_info_holder.audio).unwrap(),
+            // )
+            // .unwrap();
             let destination_path_clone: PathBuf = destination_path.clone();
             let beatmap_info_holder_clone: OsuBeatmapInfoHolderSimple =
                 (*beatmap_info_holder).clone();
@@ -141,20 +154,35 @@ fn update_audio_metadata(
         tag.set_title(&beatmap_info_holder.info.title);
         tag.set_artist(&beatmap_info_holder.info.artist);
         if let Some(background_source_path) = &beatmap_info_holder.background {
-            if let Some(loaded_image) = image::io::Reader::open(background_source_path)
-                .ok()
-                .and_then(|x| x.decode().ok())
-            {
-                let mut bytes: Vec<u8> = Vec::new();
-                if loaded_image
-                    .write_to(&mut bytes, image::ImageOutputFormat::Png)
-                    .is_ok()
-                {
-                    let cover = audiotags::Picture {
-                        mime_type: audiotags::MimeType::Png,
-                        data: &bytes,
-                    };
-                    tag.set_album_cover(cover.clone());
+            let guessed_format: Option<image::ImageFormat> = beatmap_info_holder
+                .extensions
+                .1
+                .clone()
+                .and_then(image::ImageFormat::from_extension);
+            let reader_image_result: Result<image::io::Reader<_>, _> =
+                image::io::Reader::open(background_source_path);
+            // reader_image_result.as_ref().unwrap();
+            if let Ok(reader_image) = reader_image_result {
+                let reader_image_with_guess: image::io::Reader<_> = match guessed_format {
+                    Some(x) => image::io::Reader::with_format(reader_image.into_inner(), x),
+                    None => reader_image,
+                };
+                let loaded_image_option: Result<image::DynamicImage, _> =
+                    reader_image_with_guess.decode();
+                // loaded_image_option.as_ref().unwrap();
+                if let Ok(loaded_image) = loaded_image_option {
+                    let thumbnail = loaded_image.thumbnail(512, 512);
+                    let mut bytes: Vec<u8> = Vec::new();
+                    thumbnail
+                        .write_to(&mut bytes, image::ImageOutputFormat::Bmp)
+                        .unwrap();
+                    {
+                        let cover = audiotags::Picture {
+                            mime_type: audiotags::MimeType::Bmp,
+                            data: &bytes,
+                        };
+                        tag.set_album_cover(cover.clone());
+                    }
                 }
             }
         }

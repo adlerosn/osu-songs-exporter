@@ -15,3 +15,4 @@ rusqlite = { version = "^0.24", features = ["backup"] }
 audiotags = "^0.2" 
 image = "^0.23"
 threadpool = "^1"
+subprocess = "^0.2"

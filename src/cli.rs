@@ -31,16 +31,18 @@ pub fn get_arguments_parsed() -> CliArguments {
             argparse::StoreFalse,
             "Use ASCII filenames for naming songs in the filesystem",
         );
-        parser.refer(&mut ca.osu_source).add_argument(
-            "osu_source",
-            argparse::Store,
-            "Your Osu! folder",
-        );
-        parser.refer(&mut ca.songs_destination).add_argument(
-            "songs_destination",
-            argparse::Store,
-            "Your song library folder (NOT Osu!'s)",
-        );
+        parser
+            .refer(&mut ca.osu_source)
+            .add_argument("osu_source", argparse::Store, "Your Osu! folder")
+            .required();
+        parser
+            .refer(&mut ca.songs_destination)
+            .add_argument(
+                "songs_destination",
+                argparse::Store,
+                "Your song library folder (NOT Osu!'s)",
+            )
+            .required();
         parser.refer(&mut ca.filename_template).add_option(
             &["-t", "--template"],
             argparse::Store,
