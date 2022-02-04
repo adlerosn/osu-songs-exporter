@@ -2,6 +2,7 @@ use super::model2::*;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 pub trait OsuBeatmapSets {
@@ -520,8 +521,7 @@ impl OsuBeatmapSet for Osu50BeatmapSet {
                 .filter_map(|x| x.ok())
                 .collect();
             beatmap_from_set_db_listing_item
-                .into_iter()
-                .map(|osu_betmap_db_listing| {
+                .into_iter().filter_map(|osu_betmap_db_listing| {
                     let cloned_info_ascii = info_ascii.clone();
                     let cloned_info_unicode = info_unicode.clone();
                     let cloned_background = background.clone();
@@ -555,7 +555,6 @@ impl OsuBeatmapSet for Osu50BeatmapSet {
                         })
                         .ok()
                 })
-                .filter_map(|x| x)
                 .collect()
         } else {
             vec![]
@@ -564,7 +563,7 @@ impl OsuBeatmapSet for Osu50BeatmapSet {
 }
 
 impl OsuBeatmapInfoHolderSimple {
-    pub fn build_path(&self, path: &PathBuf, filename_template: &str) -> PathBuf {
+    pub fn build_path(&self, path: &Path, filename_template: &str) -> PathBuf {
         let mut filename: String = "".to_string();
         let mut shift = false;
         for ch in filename_template.chars() {
@@ -592,7 +591,7 @@ impl OsuBeatmapInfoHolderSimple {
         }
         if let (Some(audio_extension), _) = &self.extensions {
             filename.push('.');
-            filename.push_str(&audio_extension);
+            filename.push_str(audio_extension);
         }
         path.join(filename)
     }
