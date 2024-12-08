@@ -9,6 +9,7 @@ pub struct CliArguments {
     pub remove_missing_songs: bool,
     pub skip_bitmap: bool,
     pub skip_info: bool,
+    pub duplicated: bool,
     pub compress: i8,
 }
 
@@ -18,6 +19,7 @@ pub fn get_arguments_parsed() -> CliArguments {
         PathBuf::from(""),
         PathBuf::from(""),
         true,
+        false,
         false,
         false,
         false,
@@ -68,6 +70,11 @@ pub fn get_arguments_parsed() -> CliArguments {
             &["-t", "--template"],
             argparse::Store,
             "\"osu! - %a - %t #%i\"",
+        );
+        parser.refer(&mut ca.duplicated).add_option(
+            &["-d", "--duplicate"],
+            argparse::StoreTrue,
+            "Skip track deduplication",
         );
         parser.parse_args_or_exit();
     }

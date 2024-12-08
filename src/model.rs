@@ -1,8 +1,10 @@
+use serde::Deserialize;
+
 use super::model2::*;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::path::PathBuf;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub trait OsuBeatmapSets {
@@ -27,8 +29,15 @@ pub struct OsuBeatmapInfoHolder {
 }
 
 #[derive(Debug, Clone, new)]
+pub struct BasicSongInfoPair {
+    pub ascii: BasicSongInfo,
+    pub unicode: BasicSongInfo,
+}
+
+#[derive(Debug, Clone, new)]
 pub struct OsuBeatmapInfoHolderSimple {
     pub info: BasicSongInfo,
+    pub info_pair: BasicSongInfoPair,
     pub beatmapset_id: u64,
     pub background: Option<PathBuf>,
     pub audio: PathBuf,
@@ -36,14 +45,24 @@ pub struct OsuBeatmapInfoHolderSimple {
     pub extensions: (Option<String>, Option<String>),
 }
 
+#[derive(Debug, Clone, new)]
+pub struct OsuBeatmapTrackInfo {
+    pub info: OsuBeatmapInfoHolderSimple,
+    pub audio_length: f64,
+    pub audio_bitrate: u32,
+    pub audio_sample_rate: u32,
+    pub audio_format: FFProbeAudioStreamCodec,
+}
+
 impl From<(OsuBeatmapInfoHolder, bool)> for OsuBeatmapInfoHolderSimple {
     fn from((other, unicode_support): (OsuBeatmapInfoHolder, bool)) -> Self {
         Self::new(
             if unicode_support {
-                other.unicode
+                other.unicode.clone()
             } else {
-                other.ascii
+                other.ascii.clone()
             },
+            BasicSongInfoPair::new(other.ascii, other.unicode),
             other.beatmapset_id,
             other.background,
             other.audio,
@@ -278,7 +297,6 @@ impl OsuBeatmapSets for Osu40BeatmapSetsReader {
                     .unwrap()
                     .to_str()
                     .unwrap()
-                    .to_string()
                     .split(' ')
                     .next()
                     .unwrap()
@@ -521,7 +539,8 @@ impl OsuBeatmapSet for Osu50BeatmapSet {
                 .filter_map(|x| x.ok())
                 .collect();
             beatmap_from_set_db_listing_item
-                .into_iter().filter_map(|osu_betmap_db_listing| {
+                .into_iter()
+                .filter_map(|osu_betmap_db_listing| {
                     let cloned_info_ascii = info_ascii.clone();
                     let cloned_info_unicode = info_unicode.clone();
                     let cloned_background = background.clone();
@@ -541,14 +560,14 @@ impl OsuBeatmapSet for Osu50BeatmapSet {
                                 beatmap_pathbuf,
                                 (
                                     cloned_audio_0.clone().and_then(|aud| {
-                                        PathBuf::from(&aud).extension().and_then(|x| {
-                                            x.to_str().map(|y| y.to_lowercase())
-                                        })
+                                        PathBuf::from(&aud)
+                                            .extension()
+                                            .and_then(|x| x.to_str().map(|y| y.to_lowercase()))
                                     }),
                                     cloned_background_0.clone().and_then(|bkg| {
-                                        PathBuf::from(&bkg).extension().and_then(|x| {
-                                            x.to_str().map(|y| y.to_lowercase())
-                                        })
+                                        PathBuf::from(&bkg)
+                                            .extension()
+                                            .and_then(|x| x.to_str().map(|y| y.to_lowercase()))
                                     }),
                                 ),
                             )
@@ -595,4 +614,46 @@ impl OsuBeatmapInfoHolderSimple {
         }
         path.join(filename)
     }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, new)]
+pub enum FFProbeAudioStreamCodec {
+    #[serde(rename = "mp3")]
+    MP3,
+    #[serde(rename = "vorbis")]
+    VORBIS,
+}
+
+#[derive(Debug, Clone, Deserialize, new)]
+pub struct FFProbeAudioStream {
+    pub codec_name: FFProbeAudioStreamCodec,
+    pub sample_fmt: String,
+    pub sample_rate: String,
+    pub channels: u8,
+    pub time_base: String,
+    pub start_pts: Option<u64>,
+    pub duration_ts: u64,
+    pub bit_rate: String,
+}
+#[derive(Debug, Clone, Deserialize, new)]
+pub struct FFProbeOtherStream {}
+
+#[derive(Debug, Clone, Deserialize, new)]
+#[serde(tag = "codec_type")]
+pub enum FFProbeStream {
+    #[serde(rename = "audio")]
+    Audio(FFProbeAudioStream),
+    #[serde(rename = "image")]
+    Image(FFProbeOtherStream),
+    #[serde(rename = "video")]
+    Video(FFProbeOtherStream),
+}
+
+#[derive(Debug, Clone, Deserialize, new)]
+pub struct FFProbeFormat {}
+
+#[derive(Debug, Clone, Deserialize, new)]
+pub struct FFProbeOutput {
+    pub streams: Vec<FFProbeStream>,
+    pub format: FFProbeFormat,
 }

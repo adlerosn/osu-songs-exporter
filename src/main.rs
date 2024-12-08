@@ -11,8 +11,13 @@ mod model2;
 
 use self::cli::*;
 use self::model::*;
+use core::panic;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::path::PathBuf;
+use std::sync;
+use std::sync::Arc;
 
 type FnBeatmapSetReader = dyn Fn(&PathBuf) -> Result<Box<dyn OsuBeatmapSets>, String>;
 
@@ -31,16 +36,17 @@ fn main() -> Result<(), String> {
         .collect();
     let beatmap_set_readers_success: Vec<&Box<dyn OsuBeatmapSets>> = beatmap_set_readers
         .iter()
-        .filter(|x| x.is_ok())
-        .map(|x| x.as_ref().unwrap())
+        .filter_map(|x| x.as_ref().ok())
         .collect();
     let beatmap_set_readers_failures: Vec<&String> = beatmap_set_readers
         .iter()
         .filter(|x| x.is_err())
         .map(|x| x.as_ref().map(|_| "").unwrap_err())
         .collect();
-    for beatmap_set_readers_failure in beatmap_set_readers_failures {
-        eprintln!("WARN: {}", beatmap_set_readers_failure);
+    if beatmap_set_readers_success.is_empty() {
+        for beatmap_set_readers_failure in beatmap_set_readers_failures {
+            eprintln!("WARN: {}", beatmap_set_readers_failure);
+        }
     }
     let beatmap_set_reader = beatmap_set_readers_success.first().ok_or_else(|| {
         format!(
@@ -64,9 +70,14 @@ fn main() -> Result<(), String> {
             OsuBeatmapInfoHolderSimple::from(((*beatmap_info).clone(), cli_args.unicode_filename))
         })
         .collect();
+    let deduped_beatmap_infos = if cli_args.duplicated {
+        beatmap_infos
+    } else {
+        deduplicate_infos(&beatmap_infos)
+    };
     std::fs::create_dir_all(&cli_args.songs_destination).unwrap();
-    let beatmap_copies: Vec<(PathBuf, &OsuBeatmapInfoHolderSimple)> = beatmap_infos
-        .iter()
+    let beatmap_copies: Vec<(PathBuf, OsuBeatmapInfoHolderSimple)> = deduped_beatmap_infos
+        .into_iter()
         .map(|x| {
             (
                 x.build_path(&cli_args.songs_destination, &cli_args.filename_template),
@@ -95,7 +106,12 @@ fn main() -> Result<(), String> {
         }
     }
 
-    let thread_pool = threadpool::ThreadPool::new(16);
+    let thread_pool = threadpool::ThreadPool::new(
+        std::thread::available_parallelism()
+            .and_then(|x| Ok(x.get()))
+            .unwrap_or(2)
+            * 2,
+    );
     for (destination_path, beatmap_info_holder) in beatmap_copies.into_iter() {
         let cli_args_cloned = cli_args.clone();
         let beatmap_info_holder_cloned = beatmap_info_holder.clone();
@@ -125,7 +141,7 @@ fn do_copy(
             let sps = subprocess::Exec::cmd("ffmpeg")
                 .arg("-y")
                 .arg("-i")
-                .arg(&beatmap_info_holder.audio.to_str().unwrap())
+                .arg(beatmap_info_holder.audio.to_str().unwrap())
                 .arg("-map")
                 .arg("0:a")
                 .arg("-c:a");
@@ -136,7 +152,7 @@ fn do_copy(
                     .arg("-q:a")
                     .arg(std::ffi::OsStr::new(cli_args.compress.to_string().as_str())),
             }
-            .arg(&destination_path.to_str().unwrap())
+            .arg(destination_path.to_str().unwrap())
             .stdout(subprocess::Redirection::Pipe)
             .stderr(subprocess::Redirection::Pipe)
             .join()
@@ -171,7 +187,7 @@ fn update_audio_metadata(
     skip_pic: bool,
 ) {
     if !skip_info {
-        if let Ok(mut tag) = audiotags::Tag::new().read_from_path(&destination_path) {
+        if let Ok(mut tag) = audiotags::Tag::new().read_from_path(destination_path) {
             tag.remove_album();
             tag.remove_album_artist();
             tag.remove_album_cover();
@@ -199,12 +215,14 @@ fn update_audio_metadata(
                         .1
                         .clone()
                         .and_then(image::ImageFormat::from_extension);
-                    let reader_image_result: Result<image::io::Reader<_>, _> =
-                        image::io::Reader::open(background_source_path);
+                    let reader_image_result: Result<image::ImageReader<_>, _> =
+                        image::ImageReader::open(background_source_path);
                     // reader_image_result.as_ref().unwrap();
                     if let Ok(reader_image) = reader_image_result {
-                        let reader_image_with_guess: image::io::Reader<_> = match guessed_format {
-                            Some(x) => image::io::Reader::with_format(reader_image.into_inner(), x),
+                        let reader_image_with_guess: image::ImageReader<_> = match guessed_format {
+                            Some(x) => {
+                                image::ImageReader::with_format(reader_image.into_inner(), x)
+                            }
                             None => reader_image,
                         };
                         let loaded_image_option: Result<image::DynamicImage, _> =
@@ -212,14 +230,14 @@ fn update_audio_metadata(
                         // loaded_image_option.as_ref().unwrap();
                         if let Ok(loaded_image) = loaded_image_option {
                             let thumbnail = loaded_image.thumbnail(1024, 1024);
-                            let mut bytes: Vec<u8> = Vec::new();
+                            let mut bytes_cursor = std::io::Cursor::new(vec![]);
                             thumbnail
-                                .write_to(&mut bytes, image::ImageOutputFormat::Bmp)
+                                .write_to(&mut bytes_cursor, image::ImageFormat::Png)
                                 .unwrap();
                             {
                                 let cover = audiotags::Picture {
-                                    mime_type: audiotags::MimeType::Bmp,
-                                    data: &bytes,
+                                    mime_type: audiotags::MimeType::Png,
+                                    data: bytes_cursor.get_ref(),
                                 };
                                 tag.set_album_cover(cover.clone());
                             }
@@ -231,4 +249,181 @@ fn update_audio_metadata(
                 .unwrap_or(());
         }
     }
+}
+
+fn ffprobe_audio_duration(file: &PathBuf) -> Option<FFProbeAudioStream> {
+    subprocess::Exec::cmd("ffprobe")
+        .arg("-hide_banner")
+        .arg("-show_format")
+        .arg("-show_streams")
+        .arg("-count_frames")
+        .arg("-count_packets")
+        .arg("-output_format")
+        .arg("json")
+        .arg(&file)
+        .stdout(subprocess::Redirection::Pipe)
+        .stderr(subprocess::Redirection::Pipe)
+        .capture()
+        .ok()
+        .and_then(|capture_data| match capture_data.exit_status {
+            subprocess::ExitStatus::Exited(0) => {
+                let ffpo = serde_json::from_slice::<FFProbeOutput>(&capture_data.stdout).unwrap();
+                let audstr = ffpo
+                    .streams
+                    .iter()
+                    .map(|i| match i {
+                        FFProbeStream::Audio(a) => Some(a),
+                        _ => None,
+                    })
+                    .flatten()
+                    .next()?;
+                Some((*audstr).clone())
+            }
+            _ => None,
+        })
+}
+
+fn deduplicate_infos(duplicated: &[OsuBeatmapInfoHolderSimple]) -> Vec<OsuBeatmapInfoHolderSimple> {
+    let mut ffpas_map = HashMap::<PathBuf, FFProbeAudioStream>::new();
+    {
+        let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, FFProbeAudioStream)>();
+        {
+            let tp = threadpool::ThreadPool::new(
+                std::thread::available_parallelism()
+                    .and_then(|x| Ok(x.get()))
+                    .unwrap_or(2)
+                    * 2,
+            );
+            for bm in duplicated.iter() {
+                let aud = bm.audio.clone();
+                let txc = tx.clone();
+                tp.execute(move || {
+                    if let Some(ffpas) = ffprobe_audio_duration(&aud) {
+                        txc.send((aud, ffpas)).unwrap()
+                    }
+                    drop(txc);
+                    ()
+                });
+            }
+            tp.join();
+            drop(tx);
+            drop(tp);
+        }
+        while let Ok((k, v)) = rx.recv() {
+            ffpas_map.insert(k, v);
+        }
+    }
+    let comparables: Vec<_> = duplicated
+        .iter()
+        .map(|info| {
+            let ffpas = ffpas_map.get(&info.audio)?;
+            let bit_rate = ffpas.bit_rate.parse::<u32>().ok()?;
+            let sample_rate = ffpas.sample_rate.parse::<u32>().ok()?;
+            let audio_format = ffpas.codec_name;
+            let mut time_base_part = ffpas.time_base.split('/');
+            let time_base_up = time_base_part.next()?.parse::<f64>().ok()?;
+            let time_base_dw = time_base_part.next()?.parse::<f64>().ok()?;
+            let duration_sec = (ffpas.duration_ts as f64) * time_base_up / time_base_dw;
+            Some(OsuBeatmapTrackInfo::new(
+                info.clone(),
+                duration_sec,
+                bit_rate,
+                sample_rate,
+                audio_format,
+            ))
+        })
+        .flatten()
+        .collect();
+    let mut groups: Vec<Vec<&OsuBeatmapTrackInfo>> = vec![];
+    for item in comparables.iter() {
+        let mut belongs_to: Vec<usize> = vec![];
+        for (groupid, group) in groups.iter().enumerate() {
+            for sample in group.iter() {
+                if ((item.info.info_pair.ascii.title.to_lowercase()
+                    == sample.info.info_pair.ascii.title.to_lowercase()
+                    && item.info.info_pair.ascii.artist.to_lowercase()
+                        == sample.info.info_pair.ascii.artist.to_lowercase())
+                    || (item.info.info_pair.ascii.title.to_lowercase()
+                        == sample.info.info_pair.ascii.title.to_lowercase()
+                        && item.info.info_pair.ascii.artist.to_lowercase()
+                            == sample.info.info_pair.ascii.artist.to_lowercase()))
+                    && !belongs_to.contains(&groupid)
+                {
+                    belongs_to.push(groupid);
+                }
+            }
+        }
+        match belongs_to.len() {
+            0 => groups.push(vec![item]),
+            1 => groups[belongs_to[0]].push(item),
+            _ => {
+                let mut newgroup = vec![item];
+                belongs_to.sort();
+                belongs_to.reverse();
+                for x in belongs_to {
+                    newgroup.append(&mut groups.remove(x));
+                }
+                groups.push(newgroup)
+            }
+        }
+    }
+    let chosens: Vec<_> = groups
+        .iter()
+        .map(|group| match group.len() {
+            0 => None,
+            1 => Some(group[0].info.clone()),
+            _ => {
+                let mut cgroup = group.clone();
+                cgroup.sort_by(|x, y| {
+                    if y.info.beatmapset_id < x.info.beatmapset_id {
+                        Ordering::Less
+                    } else if y.info.beatmapset_id == x.info.beatmapset_id {
+                        Ordering::Equal
+                    } else {
+                        Ordering::Greater
+                    }
+                });
+                let mut group_iter = cgroup.iter();
+                let mut best = group_iter.next().unwrap();
+                while let Some(candidate) = group_iter.next() {
+                    let bbrsc = (best.audio_bitrate as u64)
+                        * match best.audio_format {
+                            FFProbeAudioStreamCodec::MP3 => 8,
+                            FFProbeAudioStreamCodec::VORBIS => 10,
+                        };
+                    let cbrsc = (candidate.audio_bitrate as u64)
+                        * match candidate.audio_format {
+                            FFProbeAudioStreamCodec::MP3 => 8,
+                            FFProbeAudioStreamCodec::VORBIS => 10,
+                        };
+                    if bbrsc < cbrsc {
+                        best = candidate;
+                    } else if bbrsc == cbrsc
+                        && best.info.beatmapset_id < candidate.info.beatmapset_id
+                    {
+                        best = candidate;
+                    }
+                }
+                let latest_background =
+                    cgroup.iter().filter(|x| x.info.background.is_some()).next();
+                let best_mix = OsuBeatmapInfoHolderSimple::new(
+                    best.info.info.clone(),
+                    best.info.info_pair.clone(),
+                    latest_background
+                        .and_then(|x| Some(x.info.beatmapset_id))
+                        .unwrap_or(best.info.beatmapset_id),
+                    latest_background.and_then(|x| x.info.background.clone()),
+                    best.info.audio.clone(),
+                    best.info.beatmap.clone(),
+                    (
+                        best.info.extensions.0.clone(),
+                        latest_background.and_then(|x| x.info.extensions.1.clone()),
+                    ),
+                );
+                Some(best_mix)
+            }
+        })
+        .flatten()
+        .collect();
+    chosens
 }
